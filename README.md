@@ -1,54 +1,46 @@
 # Termux AI Agent
 
-AI assistant that controls your Android phone via Termux. Uses **DeepSeek V4 Flash** (free) + **termux-mcp** server.
+AI assistant that controls your Android phone via Termux. Uses **DeepSeek V4 Flash** (free) + **[wujie272/termux-mcp](https://github.com/wujie272/termux-mcp)** (MCP protocol, 72 tools).
 
 ## What it does
 
-One command → AI has full control of your device:
-- **Shell** — run commands, manage files, processes
-- **Sensors** — battery, GPS, WiFi, camera, fingerprint
-- **Communication** — SMS, calls, notifications, TTS
-- **System** — git, cron, SSH, packages, backup
-- **Media** — photos, screen recording, QR codes, OCR
+One command → AI has full control of your device via MCP protocol:
+- **Shell** — execute commands, manage files
+- **Device** — sensors, battery, display, WiFi, clipboard
+- **UI Automation** — click by text/ID/class, swipe, type, screenshot
+- **Apps** — list, launch, uninstall, usage stats
+- **Communication** — SMS, calls, clipboard, TTS
+- **System** — ADB/Shizuku, GitHub, job management
+- **Media** — camera, screen record, vibration, torch
 
 ## Quick start
 
 ```bash
 git clone https://github.com/tundefund0-gif/termux-ai-agent
 cd termux-ai-agent
-bash setup.sh
 python3 agent.py
 ```
 
-Or from anywhere after setup:
-
-```bash
-python3 ~/termux-ai
-```
+The first run will automatically:
+1. Clone [wujie272/termux-mcp](https://github.com/wujie272/termux-mcp) (~72 tools)
+2. Install Python dependencies (`mcp` package)
+3. Start the MCP server and connect
 
 ## Architecture
 
 ```
-You ──> DeepSeek V4 Flash (free API) ──> termux-mcp ──> Android/ Termux
-              │                                │
-              │  103 tools                     │  90+ HTTP endpoints
-              │  (auto-discovered)             │  (shell, sensors, SMS…)
+You ──> DeepSeek V4 Flash ──> MCP JSON-RPC ──> wujie272/termux-mcp ──> Android
+         (free OpenCode)       (stdio pipe)      (72 tools via FastMCP)
 ```
 
 - **API**: `opencode.ai/zen/v1` — free, no key needed
 - **Model**: `deepseek-v4-flash-free`
-- **Server**: [termux-mcp](https://github.com/termuxgpt/termux-mcp) — auto-starts if not running
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `agent.py` | The AI agent (339 lines) |
-| `setup.sh` | Installs termux-mcp + dependencies |
-| `start-agent.sh` | Quick launcher |
+- **Protocol**: MCP (Model Context Protocol) — JSON-RPC 2.0 over stdio
+- **Server**: [wujie272/termux-mcp](https://github.com/wujie272/termux-mcp) — built on FastMCP
 
 ## Requirements
 
 - Termux from F-Droid
 - Python 3.10+
 - Internet connection
+- `git` (`pkg install git`)
