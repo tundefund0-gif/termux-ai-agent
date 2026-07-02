@@ -95,8 +95,11 @@ class MCP:
         if params:
             msg["params"] = params
         with self._lock:
-            self.proc.stdin.write(json.dumps(msg) + "\n")
-            self.proc.stdin.flush()
+            try:
+                self.proc.stdin.write(json.dumps(msg) + "\n")
+                self.proc.stdin.flush()
+            except BrokenPipeError:
+                raise  # Let caller handle restart
             try:
                 resp = self.proc.stdout.readline()
             except Exception:
@@ -469,7 +472,10 @@ BASE_PROMPT = (
     "  Do NOT retry that tool or similar ones. Use dumpsys/getprop/sysfs instead.\n"
     "- If you've tried 2+ approaches for something and still failing, stop trying\n"
     "  and tell the user what you found. Don't keep experimenting.\n"
-    "- Be concise but thorough. Generate long code/text when asked."
+    "- Be concise but thorough. Generate long code/text when asked.\n"
+    "- To CREATE files, use execute_command with: python3 -c 'open(\"path\",\"w\").write(\"content\")'\n"
+    "  or printf/echo with redirection. NEVER use cat > file or heredoc syntax\n"
+    "  in execute_command - it breaks the MCP protocol and causes Broken pipe errors."
 )
 
 # ─── Banner ─────────────────────────────────────────────────────────────
@@ -588,6 +594,21 @@ def main():
 
             msgs = trim_history(msgs)
 
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            print(" " * 50, end="\r")
+            print(f"  {color('✖ MCP Error:', C.red)} {color(str(e)[:120], C.red)}")
+            print(f"  {color('⟳', C.yellow)} {color('Restarting MCP server...', C.dim)}", end="", flush=True)
+            mcp.stop()
+            time.sleep(0.5)
+            if mcp.start():
+                print(f" {color('✓', C.green)}")
+                # Re-fetch tools
+                tools = mcp.get_tools()
+                llm.tools = tools
+                msgs.append({"role": "system", "content": "MCP server was restarted due to a broken pipe. Avoid using heredoc/cat > in execute_command."})
+            else:
+                print(f" {color('✖', C.red)}")
+                print(f"  {color('Failed to restart MCP server', C.red)}")
         except Exception as e:
             print(" " * 50, end="\r")
             print(f"  {color('✖ Error:', C.red)} {color(str(e)[:200], C.red)}")
