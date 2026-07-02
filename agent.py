@@ -59,6 +59,7 @@ class MCP:
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
+            env={**os.environ},
         )
         # Initialize handshake
         r = self._send("initialize", {
