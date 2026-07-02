@@ -220,7 +220,7 @@ def install_mcp():
 
 # ─── Agent ─────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are TermuxAI, an AI assistant controlling an Android phone via Termux.
-You have 70+ MCP tools: shell commands, file system, device sensors, ADB/Shizuku,
+You have 80 MCP tools: shell, device, UI automation, ADB, GitHub, and more: shell commands, file system, device sensors, ADB/Shizuku,
 UI automation, app management, communication, media, GitHub, and more.
 
 RULES:
@@ -231,7 +231,7 @@ RULES:
 
 BANNER = f"""  {color('┌─────────────────────────────────────────────┐', C.cyan)}
   {color('│', C.cyan)}  {color('⚡ TERMUX AI AGENT', C.bold)} {color('— DeepSeek V4 Flash', C.white)}  {color('│', C.cyan)}
-  {color('│', C.cyan)}  {color('× wujie272 MCP    72 tools', C.magenta)}     {color('│', C.cyan)}
+  {color('│', C.cyan)}  {color('× wujie272 MCP   80 tools', C.magenta)}{color('│', C.cyan)}
   {color('└─────────────────────────────────────────────┘', C.cyan)}"""
 
 def main():
