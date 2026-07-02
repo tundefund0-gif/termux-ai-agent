@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Termux AI Agent — DeepSeek V4 Flash (free) + wujie272/termux-mcp (MCP)
-Controls Android via proper MCP protocol (JSON-RPC 2.0 over stdio).
+Termux AI Agent v3.0 — DeepSeek V4 Flash + wujie272/termux-mcp (80 tools)
+══════════════════════════════════════════════════════════════════════════
+Real SSE streaming • Reasoning display • Long text generation & input
+Futuristic UI • 80 MCP tools • GitHub enabled
+══════════════════════════════════════════════════════════════════════════
 """
 
-import json, os, sys, time, subprocess, socket, threading
+import json, os, sys, time, subprocess, threading
 from pathlib import Path
 import requests
 
-# ─── Config ────────────────────────────────────────────────────────────────
+# ─── Configuration ───────────────────────────────────────────────────────
 CONFIG_FILE = Path.home() / ".termux-agent.json"
 MCP_DIR = os.path.expanduser("~/wujie-mcp-test")
 
@@ -26,21 +29,24 @@ def load_config():
     if CONFIG_FILE.exists():
         try:
             cfg.update(json.loads(CONFIG_FILE.read_text()))
-        except: pass
+        except Exception:
+            pass
     return cfg
 
-# ─── Colors ────────────────────────────────────────────────────────────────
+# ─── Futuristic Colors ──────────────────────────────────────────────────
 class C:
     reset = "\033[0m"; bold = "\033[1m"; dim = "\033[90m"
     green = "\033[32m"; bgreen = "\033[92m"; yellow = "\033[93m"
     red = "\033[91m"; blue = "\033[94m"; magenta = "\033[95m"
     cyan = "\033[96m"; white = "\033[97m"
+    orange = "\033[38;5;214m"; pink = "\033[38;5;213m"
+    purple = "\033[38;5;141m"; teal = "\033[38;5;80m"
 
-def color(t, c): return f"{c}{t}{C.reset}"
+def color(t, c):
+    return f"{c}{t}{C.reset}"
 
-# ─── MCP Client ────────────────────────────────────────────────────────────
+# ─── MCP Client (JSON-RPC 2.0 over stdio) ───────────────────────────────
 class MCP:
-    """Communicates with termux-mcp via MCP stdio protocol (JSON-RPC 2.0)."""
     def __init__(self):
         self.proc = None
         self._tools = None
@@ -48,7 +54,6 @@ class MCP:
         self._req_id = 0
 
     def start(self):
-        """Spawn the MCP server in stdio mode."""
         if not os.path.isdir(MCP_DIR):
             return False
         self.proc = subprocess.Popen(
@@ -61,46 +66,47 @@ class MCP:
             bufsize=1,
             env={**os.environ},
         )
-        # Initialize handshake
         r = self._send("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "termux-ai-agent", "version": "2.0"},
+            "clientInfo": {"name": "termux-ai-agent", "version": "3.0"},
         })
         if not r or "result" not in r:
             return False
-        # Send initialized notification
         self._notify("notifications/initialized")
         return True
 
     def stop(self):
         if self.proc:
-            try: self.proc.terminate()
-            except: pass
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
             self.proc = None
 
     def _next_id(self):
         self._req_id += 1
         return self._req_id
 
-    def _send(self, method, params=None, id=None):
-        """Send a JSON-RPC request and read the response."""
+    def _send(self, method, params=None, id_val=None):
         if not self.proc or not self.proc.stdin:
             return None
-        msg = {"jsonrpc": "2.0", "method": method, "id": id or self._next_id()}
+        msg = {"jsonrpc": "2.0", "method": method, "id": id_val or self._next_id()}
         if params:
             msg["params"] = params
         with self._lock:
             self.proc.stdin.write(json.dumps(msg) + "\n")
             self.proc.stdin.flush()
-            resp = self.proc.stdout.readline()
+            try:
+                resp = self.proc.stdout.readline()
+            except Exception:
+                return None
         try:
             return json.loads(resp.strip())
-        except:
+        except Exception:
             return None
 
     def _notify(self, method, params=None):
-        """Send a JSON-RPC notification (no response expected)."""
         if not self.proc or not self.proc.stdin:
             return
         msg = {"jsonrpc": "2.0", "method": method}
@@ -115,10 +121,9 @@ class MCP:
             return self._tools
         r = self._send("tools/list")
         if r and "result" in r:
-            tools = r["result"].get("tools", [])
-            # Convert MCP schemas to OpenAI-compatible format
+            tools_raw = r["result"].get("tools", [])
             openai_tools = []
-            for t in tools:
+            for t in tools_raw:
                 ot = {
                     "type": "function",
                     "function": {
@@ -133,118 +138,314 @@ class MCP:
         return []
 
     def call(self, tool_name, args):
-        """Call a tool via MCP tools/call and return the text result."""
         r = self._send("tools/call", {"name": tool_name, "arguments": args})
         if not r:
-            return "[MCP Error: No response]"
+            return "[MCP Error: No response from server]"
         if "error" in r:
-            return f"[MCP Error: {r['error'].get('message', 'unknown')}]"
-        result = r.get("result", {})
-        content = result.get("content", [])
-        parts = []
-        is_error = result.get("isError", False)
-        for c in content:
-            if c.get("type") == "text":
-                parts.append(c["text"])
-            elif c.get("type") == "resource":
-                parts.append(str(c.get("resource", {})))
-        output = "\n".join(parts)
-        if is_error:
-            output = f"[Error] {output}"
-        return output
+            return f"[MCP Error: {r['error'].get('message', str(r['error']))}]"
+        content = r.get("result", {}).get("content", [])
+        texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+        return "\n".join(texts) if texts else json.dumps(r["result"], indent=2)
 
-# ─── LLM Client ────────────────────────────────────────────────────────────
-class LLM:
-    def __init__(self, config, tools):
-        self.key = config.get("api_key", "")
-        self.base = config["base_url"].rstrip("/")
-        self.model = config["model"]
-        self.max_tokens = config.get("max_tokens", 65536)
-        self.temp = config.get("temperature", 0.7)
-        self.top_p = config.get("top_p", 0.95)
-        self.tools = tools
-
-    def chat(self, messages):
-        body = {
-            "model": self.model, "messages": messages,
-            "max_tokens": self.max_tokens, "temperature": self.temp, "top_p": self.top_p,
-        }
-        if self.tools:
-            body["tools"] = self.tools
-            body["tool_choice"] = "auto"
-
-        headers = {"Content-Type": "application/json"}
-        if self.key:
-            headers["Authorization"] = f"Bearer {self.key}"
-
-        r = requests.post(f"{self.base}/chat/completions", headers=headers, json=body, timeout=120)
-        if r.status_code != 200:
-            raise RuntimeError(f"API {r.status_code}: {r.text[:200]}")
-        return r.json()
-
-# ─── Install MCP Server ────────────────────────────────────────────────────
+# ─── MCP Auto-Installer ─────────────────────────────────────────────────
 def install_mcp():
-    """Clone wujie272/termux-mcp if not present."""
     if os.path.isdir(MCP_DIR):
         return True
-    print(f"  {color('⟳', C.yellow)} {color('Installing wujie272/termux-mcp...', C.dim)}", end="", flush=True)
+    print(f"  {color('⟳', C.yellow)} {color('Installing wujie272/termux-mcp...', C.dim)}")
     try:
-        r = subprocess.run(
-            ["git", "clone", "--depth", "1",
-             "https://github.com/wujie272/termux-mcp.git", MCP_DIR],
-            capture_output=True, text=True, timeout=30,
+        subprocess.run(
+            ["git", "clone", "https://github.com/wujie272/termux-mcp.git", MCP_DIR],
+            capture_output=True, check=True
         )
-        if r.returncode != 0:
-            print(f" {color('✖', C.red)}")
-            print(f"  {r.stderr[:200]}")
-            return False
-        print(f" {color('✓', C.green)}")
-        # Install deps
-        print(f"  {color('⟳', C.yellow)} {color('Installing Python deps...', C.dim)}", end="", flush=True)
-        r2 = subprocess.run(
-            ["pip3", "install", "mcp"],
-            capture_output=True, text=True, timeout=120,
+    except Exception:
+        print(f"  {color('✖', C.red)} Git clone failed. Check internet.", C.red)
+        return False
+    for pkg_cmd in [
+        ["pip3", "install", "mcp", "requests"],
+        ["pip3", "install", "mcp", "requests", "--break-system-packages"],
+    ]:
+        try:
+            subprocess.run(pkg_cmd, capture_output=True)
+        except Exception:
+            pass
+    # Enable GitHub tools
+    app_py = Path(MCP_DIR) / "termux_mcp" / "app.py"
+    if app_py.exists():
+        content = app_py.read_text()
+        if "# import termux_mcp.tools.github" in content:
+            content = content.replace("# import termux_mcp.tools.github", "import termux_mcp.tools.github")
+            app_py.write_text(content)
+            print(f"  {color('✓', C.green)} GitHub tools enabled", C.dim)
+    return True
+
+# ─── LLM Client with SSE Streaming ──────────────────────────────────────
+class LLM:
+    def __init__(self, config, tools):
+        self.config = config
+        self.tools = tools
+        self.session = requests.Session()
+
+    def _headers(self):
+        h = {"Content-Type": "application/json"}
+        if self.config.get("api_key"):
+            h["Authorization"] = f"Bearer {self.config['api_key']}"
+        return h
+
+    def _payload(self, messages, stream=False):
+        p = {
+            "model": self.config["model"],
+            "messages": messages,
+            "max_tokens": self.config.get("max_tokens", 65536),
+            "temperature": self.config.get("temperature", 0.7),
+            "top_p": self.config.get("top_p", 0.95),
+            "stream": stream,
+        }
+        if self.tools:
+            p["tools"] = self.tools
+            p["tool_choice"] = "auto"
+        return p
+
+    def chat(self, messages):
+        """Non-streaming call — for tool detection."""
+        resp = self.session.post(
+            self.config["base_url"] + "/chat/completions",
+            headers=self._headers(),
+            json=self._payload(messages, stream=False),
+            timeout=180,
         )
-        if r2.returncode == 0 or "already satisfied" in r2.stdout:
-            print(f" {color('✓', C.green)}")
+        resp.raise_for_status()
+        return resp.json()
+
+    def chat_stream(self, messages):
+        """
+        Streaming SSE call — yields (content, reasoning, is_done) tuples.
+        Accumulates tool calls silently. At the end yields the full msg dict.
+        """
+        resp = self.session.post(
+            self.config["base_url"] + "/chat/completions",
+            headers=self._headers(),
+            json=self._payload(messages, stream=True),
+            stream=True,
+            timeout=180,
+        )
+        resp.raise_for_status()
+
+        full_content = ""
+        full_reasoning = ""
+        tool_calls = {}
+        in_reasoning = False
+
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            if line.startswith(b"data: "):
+                data = line[6:].decode("utf-8").strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices", [])
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                finish = choices[0].get("finish_reason")
+
+                # Reasoning content (DeepSeek shows this before answering)
+                rc = delta.get("reasoning_content")
+                if rc:
+                    full_reasoning += rc
+                    if not in_reasoning:
+                        in_reasoning = True
+                    yield ("reasoning", rc, False)
+
+                # Regular content
+                content = delta.get("content")
+                if content:
+                    full_content += content
+                    if in_reasoning:
+                        in_reasoning = False
+                        yield ("end_reasoning", "", False)
+                    yield ("content", content, False)
+
+                # Tool calls
+                tc = delta.get("tool_calls")
+                if tc:
+                    for tcc in tc:
+                        idx = tcc.get("index", 0)
+                        if idx not in tool_calls:
+                            tool_calls[idx] = {
+                                "id": tcc.get("id", ""),
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""}
+                            }
+                        fn = tcc.get("function", {})
+                        if fn.get("name"):
+                            tool_calls[idx]["function"]["name"] += fn["name"]
+                        if fn.get("arguments"):
+                            tool_calls[idx]["function"]["arguments"] += fn["arguments"]
+                        if tcc.get("id"):
+                            tool_calls[idx]["id"] = tcc["id"]
+
+                if finish == "stop":
+                    break
+
+        # Build final message
+        msg = {"role": "assistant", "content": full_content}
+        if full_reasoning:
+            msg["reasoning_content"] = full_reasoning
+        if tool_calls:
+            sorted_calls = [tool_calls[i] for i in sorted(tool_calls.keys())]
+            msg["tool_calls"] = sorted_calls
+        yield ("done", msg, True)
+
+# ─── Conversation History Management ────────────────────────────────────
+def trim_history(msgs, max_turns=40):
+    """Keep conversation manageable while preserving context."""
+    if len(msgs) <= max_turns:
+        return msgs
+    keep = [msgs[0]]  # system prompt
+    user_msgs = []
+    # Find last 3 user messages
+    for i in range(len(msgs) - 1, -1, -1):
+        if msgs[i]["role"] == "user":
+            user_msgs.insert(0, msgs[i])
+            if len(user_msgs) >= 3:
+                break
+    keep.extend(user_msgs)
+    # Add last N-3 messages around those
+    cutoff = max(1, len(msgs) - (max_turns - len(keep)))
+    for i in range(cutoff, len(msgs)):
+        if msgs[i] not in keep:
+            keep.append(msgs[i])
+    return keep
+
+# ─── User Input (with multiline + file support) ─────────────────────────
+def get_user_input():
+    raw = input(f"  {color('You', C.blue)} {color('›', C.cyan)} ").strip()
+    if not raw:
+        return ""
+
+    # Multiline mode: """..."""
+    if raw in ('"""', "'''", "%%%"):
+        delimiter = raw
+        print(f"  {color('(multiline mode — end with ' + delimiter + ')', C.dim)}")
+        lines = []
+        try:
+            while True:
+                line = input(f"  {color('...', C.dim)} ")
+                if line.strip() == delimiter:
+                    break
+                lines.append(line)
+        except (EOFError, KeyboardInterrupt):
+            pass
+        return "\n".join(lines)
+
+    # File input: @/path/to/file
+    if raw.startswith("@"):
+        fpath = os.path.expanduser(raw[1:].strip())
+        if os.path.isfile(fpath):
+            try:
+                content = Path(fpath).read_text()
+                print(f"  {color(f'✓ Loaded {len(content)} chars', C.dim)}")
+                return content
+            except Exception as e:
+                print(f"  {color(f'✖ {e}', C.red)}")
         else:
-            print(f" {color('?', C.yellow)} {r2.stdout[-100:]}")
-        return True
-    except subprocess.TimeoutExpired:
-        print(f" {color('✖', C.red)}")
-        print(f"  {color('Timed out cloning repo', C.red)}")
-        return False
-    except Exception as e:
-        print(f" {color('✖', C.red)}")
-        print(f"  {color(str(e), C.red)}")
-        return False
+            print(f"  {color('✖ File not found: ' + fpath, C.red)}")
+        return ""
+    return raw
 
-# ─── Agent ─────────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are TermuxAI, an AI assistant controlling an Android phone via Termux.
-You have 80 MCP tools: shell, device, UI automation, ADB, GitHub, and more: shell commands, file system, device sensors, ADB/Shizuku,
-UI automation, app management, communication, media, GitHub, and more.
+# ─── Streaming Display ──────────────────────────────────────────────────
+def display_streaming_response(mcp, llm, msgs, msg):
+    """Display a streaming text response, or process tool calls."""
+    if msg.get("tool_calls"):
+        msgs.append(msg)
+        for tc in msg["tool_calls"]:
+            name = tc["function"]["name"]
+            try:
+                args = json.loads(tc["function"]["arguments"])
+            except Exception:
+                args = {}
+            preview = json.dumps(args)
+            if len(preview) > 60:
+                preview = preview[:60] + "…"
+            print(f"  {color('◆', C.magenta)} {color(name, C.cyan)} {color(preview, C.dim)}", end="", flush=True)
+            result = mcp.call(name, args)
+            rlen = len(result)
+            if rlen < 100:
+                col = C.green
+                tag = "S"
+            elif rlen < 5000:
+                col = C.yellow
+                tag = "M"
+            else:
+                col = C.red
+                tag = "L"
+            print(f" {color(f'[{tag}|{rlen}b]', col)}")
+            if rlen > 50000:
+                result = result[:50000] + f"\n... [truncated {rlen - 50000} more bytes]"
+            msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+        print(f"  {color('·' * 40, C.dim)}")
+        return True  # had tool calls, should continue
+    else:
+        flush_before = ""
+        # Stream the response
+        print(f"  {color('AI', C.green)} {color('›', C.green)} ", end="", flush=True)
+        for evt_type, data, done in llm.chat_stream(msgs):
+            if evt_type == "reasoning":
+                if not flush_before:
+                    print(f"{color('(thinking ', C.dim)}", end="", flush=True)
+                    flush_before = "reasoning"
+                print(f"{color(data, C.dim)}", end="", flush=True)
+            elif evt_type == "end_reasoning":
+                print(f"{color(') ', C.dim)}", end="", flush=True)
+                flush_before = ""
+            elif evt_type == "content":
+                print(data, end="", flush=True)
+            elif evt_type == "done":
+                # data is the msg dict
+                msgs.append(data)
+        print()
+        return False  # no tool calls, conversation turn complete
 
-RULES:
-- Use tools to DO things the user asks — don't just describe
-- Show results clearly after running commands
-- If something fails, try alternatives
-- Be concise and helpful"""
+# ─── System Prompt ──────────────────────────────────────────────────────
+SYSTEM_PROMPT = (
+    "You are TermuxAI, an AI assistant controlling an Android device via Termux MCP.\n"
+    "You have 80 tools: shell commands, file system, UI automation, ADB/Shizuku,\n"
+    "app management, communication (SMS/calls/clipboard), device sensors, media,\n"
+    "GitHub, and more.\n\n"
+    "RULES:\n"
+    "- Execute commands immediately when asked — don't just describe\n"
+    "- Show clear results after each action\n"
+    "- If something fails, try alternatives or explain clearly\n"
+    "- Be concise but thorough\n"
+    "- You can generate long text, code, and analysis"
+)
 
-BANNER = f"""  {color('┌─────────────────────────────────────────────┐', C.cyan)}
-  {color('│', C.cyan)}  {color('⚡ TERMUX AI AGENT', C.bold)} {color('— DeepSeek V4 Flash', C.white)}  {color('│', C.cyan)}
-  {color('│', C.cyan)}  {color('× wujie272 MCP   80 tools', C.magenta)}{color('│', C.cyan)}
-  {color('└─────────────────────────────────────────────┘', C.cyan)}"""
+# ─── Banner ─────────────────────────────────────────────────────────────
+BANNER = (
+    f"\n"
+    f"  {color('╔══════════════════════════════════════════════════╗', C.cyan)}\n"
+    f"  {color('║', C.cyan)}  {color('⚡ TERMUX AI AGENT', C.bold)} {color('v3.0', C.dim)}              {color('║', C.cyan)}\n"
+    f"  {color('║', C.cyan)}  {color('DeepSeek V4 Flash', C.green)} {color('×', C.dim)} {color('wujie272 MCP', C.magenta)} {color('80 tools', C.dim)} {color('║', C.cyan)}\n"
+    f"  {color('║', C.cyan)}  {color('SSE Streaming • Reasoning • Long Text', C.dim)} {color('║', C.cyan)}\n"
+    f"  {color('╚══════════════════════════════════════════════════╝', C.cyan)}"
+)
 
+# ─── Main Loop ──────────────────────────────────────────────────────────
 def main():
     config = load_config()
+
+    os.system("clear")
     print(BANNER)
 
-    # Install MCP server if needed
     if not install_mcp():
         sys.exit(1)
 
     # Start MCP server
-    print(f"  {color('⟳', C.yellow)} {color('Starting MCP server...', C.dim)}", end="", flush=True)
+    print(f"  {color('⟳', C.yellow)} {color('Booting MCP server...', C.dim)}", end="", flush=True)
     mcp = MCP()
     if not mcp.start():
         print(f" {color('✖', C.red)}")
@@ -253,82 +454,71 @@ def main():
     print(f" {color('✓', C.green)}")
 
     tools = mcp.get_tools()
-    print(f"  {color('✓', C.green)} {color('wujie272/termux-mcp', C.cyan)} {color(f'({len(tools)} tools)', C.dim)}")
-    print(f"  {color('✓', C.green)} {color('DeepSeek V4 Flash', C.green)} {color('(free)', C.dim)}")
-    print(f"  {color('─', C.dim) * 47}\n")
+    print(f"  {color('✓', C.green)} {color('MCP', C.cyan)} {color(f'({len(tools)} tools loaded)', C.dim)}")
+    print(f"  {color('✓', C.green)} {color('DeepSeek V4 Flash', C.green)} {color('(opencode.ai)', C.dim)}")
+    print(f"  {color('✓', C.green)} {color('SSE Streaming', C.pink)} {color('•', C.dim)} {color('Reasoning', C.purple)} {color('•', C.dim)} {color('Long Text', C.yellow)}")
+    print(f"  {color('─' * 52, C.dim)}")
 
     llm = LLM(config, tools)
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    try:
-        while True:
-            try:
-                raw = input(f"  {color('You', C.blue)} {color('›', C.cyan)} ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print(f"\n  {color('Bye!', C.dim)}")
-                break
+    while True:
+        try:
+            raw = get_user_input()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n  {color('Bye! 👋', C.green)}")
+            break
 
-            if not raw: continue
-            if raw.lower() in ("exit", "quit", "q"):
-                print(f"  {color('Bye!', C.dim)}")
-                break
+        if not raw:
+            continue
+        if raw.lower() in ("exit", "quit", "q", "/bye"):
+            print(f"  {color('Bye! 👋', C.green)}")
+            break
+        if raw.lower() == "/clear":
+            msgs = [msgs[0]]
+            os.system("clear")
+            print(BANNER)
+            print(f"  {color('Conversation cleared', C.dim)}")
+            print(f"  {color('─' * 52, C.dim)}")
+            continue
+        if raw.lower() == "/help":
+            print(f"  {color('Commands:', C.dim)}")
+            print(f"    {color('/clear', C.yellow)}     — Clear chat history")
+            print(f"    {color('/bye', C.yellow)}       — Exit")
+            print(f"    {color('\"\"\"...\"\"\"', C.yellow)}  — Multiline input")
+            print(f"    {color('@/path/to/file', C.yellow)} — Read from file")
+            print(f"  {color('─' * 52, C.dim)}")
+            continue
 
-            msgs.append({"role": "user", "content": raw})
+        msgs.append({"role": "user", "content": raw})
 
-            for _ in range(20):
-                print(f"  {color('AI', C.green)} {color('● thinking...', C.dim)}", end="\r")
-                sys.stdout.flush()
+        try:
+            # First call: detect tool_calls vs text
+            data = llm.chat(msgs)
+            choice = data["choices"][0]
+            msg = choice["message"]
 
-                try:
-                    data = llm.chat(msgs)
-                except Exception as e:
-                    print(" " * 50, end="\r")
-                    print(f"  {color('✖', C.red)} {color(str(e)[:120], C.red)}")
+            while True:
+                needs_continue = display_streaming_response(mcp, llm, msgs, msg)
+                if not needs_continue:
                     break
-
-                choice = data["choices"][0]
-                msg = choice["message"]
-                finish = choice.get("finish_reason", "")
-                msgs.append(msg)
+                # Follow-up after tool calls
+                print(f"  {color('AI', C.green)} {color('⟳ follow-up...', C.dim)}", end="\r")
+                sys.stdout.flush()
+                data = llm.chat(msgs)
+                msg = data["choices"][0]["message"]
                 print(" " * 50, end="\r")
 
-                if finish == "stop" or not msg.get("tool_calls"):
-                    content = msg.get("content", "") or ""
-                    print(f"  {color('AI', C.green)} {color('›', C.green)} ", end="", flush=True)
-                    for ch in content:
-                        print(ch, end="", flush=True)
-                        time.sleep(0.01)
-                    print()
-                    break
+            msgs = trim_history(msgs)
 
-                for tc in msg["tool_calls"]:
-                    name = tc["function"]["name"]
-                    try:
-                        args = json.loads(tc["function"]["arguments"])
-                    except:
-                        args = {}
-                    preview = json.dumps(args)
-                    if len(preview) > 60:
-                        preview = preview[:60] + "…"
-                    print(f"  {color('◆', C.magenta)} {color(name, C.magenta)} {color(preview, C.dim)}", end="", flush=True)
-                    result = mcp.call(name, args)
-                    rlen = len(result)
-                    col = C.green if rlen < 100 else C.yellow if rlen < 5000 else C.red
-                    print(f" {color(f'[{rlen}b]', col)}")
-                    msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+        except Exception as e:
+            print(" " * 50, end="\r")
+            print(f"  {color('✖ Error:', C.red)} {color(str(e)[:200], C.red)}")
 
-            if len(msgs) > 50:
-                keep = [msgs[0]]
-                for i in range(len(msgs)-1, -1, -1):
-                    if msgs[i]["role"] == "user":
-                        keep.append(msgs[i])
-                        break
-                keep.extend(msgs[-20:])
-                msgs = keep
+        print(f"  {color('─' * 52, C.dim)}")
 
-            print(f"  {color('·' * 40, C.dim)}\n")
-    finally:
-        mcp.stop()
+    mcp.stop()
+    print(f"  {color('MCP server shut down.', C.dim)}")
 
 if __name__ == "__main__":
     main()

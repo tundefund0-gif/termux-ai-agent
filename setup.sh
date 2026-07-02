@@ -1,21 +1,26 @@
 #!/bin/bash
 set -e
-DIR="$(cd "$(dirname "$0")" && pwd)"
-echo "  ┌─────────────────────────────────────────────┐"
-echo "  │  Termux AI Agent — Setup                    │"
-echo "  └─────────────────────────────────────────────┘"
+echo ""
+echo "  ╔══════════════════════════════════════════════════╗"
+echo "  ║   Termux AI Agent v3.0 — Setup                  ║"
+echo "  ║   DeepSeek V4 Flash × wujie272 MCP (80 tools)   ║"
+echo "  ╚══════════════════════════════════════════════════╝"
 echo ""
 
-# Install mcp package
-echo "  ⟳ Installing Python deps..."
-pip3 install mcp 2>&1 | tail -3
+# Install Python deps
+echo "  ⟳ Installing Python packages..."
+pip3 install requests mcp 2>&1 | tail -3 || true
+pip3 install requests mcp --break-system-packages 2>&1 | tail -3 || true
 
-# Symlink
-ln -sf "$DIR/agent.py" "$HOME/termux-ai"
-echo "  ✓ Symlink: ~/termux-ai → $DIR/agent.py"
+# Make agent executable
+chmod +x "$(dirname "$0")/agent.py" 2>/dev/null || true
 
+# Create symlink
+ln -sf "$(dirname "$0")/agent.py" "$HOME/termux-ai"
+echo "  ✓ Symlink: ~/termux-ai → $(dirname "$0")/agent.py"
 echo ""
-echo "  ─────────────────────────────────────────────"
+echo "  ─────────────────────────────────────────────────"
 echo "  ✅ Setup complete!"
-echo "  Run: python3 ~/termux-ai"
-echo "  ─────────────────────────────────────────────"
+echo "  Run:  cd $(dirname "$0") && python3 agent.py"
+echo "  Or:   ~/termux-ai"
+echo "  ─────────────────────────────────────────────────"
