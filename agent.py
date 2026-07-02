@@ -107,21 +107,84 @@ class MCP:
         self.proc = None
         self._tools = None
 
+    def _kill_port(self, port):
+        """Kill any process listening on the given port."""
+        # Method 1: try fuser
+        try:
+            subprocess.run(["fuser", "-k", f"{port}/tcp"],
+                         capture_output=True, timeout=3)
+            return
+        except Exception:
+            pass
+        # Method 2: try reading /proc/net/tcp
+        try:
+            with open("/proc/net/tcp") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) < 10:
+                        continue
+                    local = parts[1]  # local_address in hex
+                    if ":" in local:
+                        hex_port = local.split(":")[1]
+                        if int(hex_port, 16) == port:
+                            pid_hex = parts[9]
+                            pid = int(pid_hex, 16)
+                            if pid > 0:
+                                try:
+                                    os.kill(pid, 9)
+                                except Exception:
+                                    pass
+        except Exception:
+            pass
+        # Method 3: try ss
+        try:
+            result = subprocess.run(
+                ["ss", "-tlnp"],
+                capture_output=True, text=True, timeout=3
+            )
+            for line in result.stdout.split("\n"):
+                if f":{port} " in line and "pid=" in line:
+                    pid_str = line.split("pid=")[1].split(",")[0]
+                    try:
+                        os.kill(int(pid_str), 9)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def start(self):
         """Start the termuxgpt MCP server in background."""
         if not os.path.isdir(MCP_DIR):
             return False
-        # Check if already running
+
+        # First, kill anything on our port
         try:
-            conn = HTTPConnection("127.0.0.1", MCP_PORT, timeout=2)
-            conn.request("GET", "/ping")
-            resp = conn.getresponse()
-            resp.read()
-            if resp.status == 200:
-                return True  # Already running
+            subprocess.run(["fuser", "-k", f"{MCP_PORT}/tcp"],
+                         capture_output=True, timeout=3)
+            time.sleep(1)
+        except Exception:
+            pass
+        # Also kill leftover MCP processes
+        try:
+            subprocess.run(["pkill", "-f", "termux_mcp"],
+                         capture_output=True, timeout=3)
+            time.sleep(0.5)
         except Exception:
             pass
 
+        # Check if already running (after cleanup)
+        for _ in range(3):
+            try:
+                conn = HTTPConnection("127.0.0.1", MCP_PORT, timeout=2)
+                conn.request("GET", "/ping")
+                resp = conn.getresponse()
+                body = resp.read()
+                if resp.status == 200:
+                    return True  # Already running
+            except Exception:
+                break
+
+        # Start fresh
         self.proc = subprocess.Popen(
             ["python3", "-m", "termux_mcp"],
             cwd=MCP_DIR,
@@ -130,17 +193,24 @@ class MCP:
             env={**os.environ},
         )
 
-        # Wait for server to start
-        for _ in range(20):
+        # Wait for server to start (with retries)
+        for attempt in range(30):
             time.sleep(0.5)
             try:
-                conn = HTTPConnection("127.0.0.1", MCP_PORT, timeout=1)
+                conn = HTTPConnection("127.0.0.1", MCP_PORT, timeout=2)
                 conn.request("GET", "/ping")
                 resp = conn.getresponse()
-                resp.read()
-                if resp.status == 200:
+                body = resp.read().decode()
+                if resp.status == 200 and '"status": "ok"' in body:
                     return True
             except Exception:
+                if attempt == 15:
+                    # Try again if it might be a port conflict
+                    try:
+                        subprocess.run(["fuser", "-k", f"{MCP_PORT}/tcp"],
+                                     capture_output=True, timeout=3)
+                    except Exception:
+                        pass
                 continue
         return False
 
@@ -155,8 +225,12 @@ class MCP:
                 except Exception:
                     pass
             self.proc = None
-        # Also try to kill any running server
-        subprocess.run(["pkill", "-f", "termux_mcp"], capture_output=True)
+        # Also try to kill any running server and free port
+        subprocess.run(["pkill", "-f", "python3.*termux_mcp"], capture_output=True)
+        try:
+            self._kill_port(MCP_PORT)
+        except Exception:
+            pass
 
     def get_tools(self):
         if self._tools:
@@ -220,6 +294,29 @@ def install_mcp():
             pass
     print(f"  {color('✓', C.green)} termuxgpt/termux-mcp installed", C.dim)
     return True
+
+# ─── Termux:API Probe ───────────────────────────────────────────────────
+def probe_failing_tools(mcp):
+    """Test which tools fail due to missing Termux:API. Returns warning string or empty."""
+    failing = []
+    # Keywords that indicate a tool is unavailable
+    fail_keywords = ["failed", "not found", "command not found", "error:", "missing",
+                     "permission denied", "not installed", "no such file", "unable"]
+    for tool_name in ["tts_speak", "battery", "location", "camera_photo"]:
+        args = {} if tool_name != "tts_speak" else {"text": "test"}
+        result = mcp.call(tool_name, args)
+        rl = result.lower()
+        if len(result) < 50 or any(kw in rl for kw in fail_keywords):
+            failing.append(tool_name)
+
+    if failing:
+        return (
+            "IMPORTANT: These MCP tools are UNAVAILABLE (Termux:API not installed):\n"
+            + ", ".join(failing) + ".\n"
+            "They will FAIL if called. DO NOT call them.\n"
+            "Alternatives: use 'run' with shell commands instead."
+        )
+    return ""
 
 # ─── LLM Client ───────────────────────────────────────────────────────────
 class LLM:
@@ -487,12 +584,25 @@ def main():
     # Get tools
     tools = mcp.get_tools()
     print(f"  {color('✓', C.green)} {color('MCP', C.cyan)} {color(f'({len(tools)} tools loaded)', C.dim)}")
+
+    # Probe for failing tools
+    print(f"  {color('⟳', C.yellow)} {color('Testing tool availability...', C.dim)}", end="", flush=True)
+    tool_warning = probe_failing_tools(mcp)
+    if tool_warning:
+        print(f" {color('⚠', C.yellow)}")
+        print(f"  {color('⚠', C.yellow)} {color('Some tools unavailable (TTS, battery, etc.)', C.dim)}")
+    else:
+        print(f" {color('✓', C.green)}")
+
     print(f"  {color('✓', C.green)} {color('DeepSeek V4 Flash', C.green)} {color('(opencode.ai)', C.dim)}")
     print(f"  {color('✓', C.green)} {color('SSE Streaming', C.pink)} {color('•', C.dim)} {color('Reasoning', C.purple)} {color('•', C.dim)} {color('REST API', C.teal)}")
     print(f"  {color('─' * 52, C.dim)}")
 
     llm = LLM(config, tools)
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    system_content = SYSTEM_PROMPT
+    if tool_warning:
+        system_content += "\n\n" + tool_warning
+    msgs = [{"role": "system", "content": system_content}]
 
     try:
         while True:
