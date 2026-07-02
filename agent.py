@@ -179,7 +179,7 @@ class MCP:
             resp = requests.post(
                 f"{MCP_URL}{endpoint}",
                 json=args or {},
-                timeout=120,
+                timeout=(30 if tool_name == "run" else 120),
             )
             if resp.status_code == 200:
                 return resp.text
@@ -190,6 +190,7 @@ class MCP:
                 except Exception:
                     return f"[Error: HTTP {resp.status_code}]"
         except requests.exceptions.Timeout:
+            import sys; sys.stderr.write(f"[MCP Timeout] {tool_name} timed out\n"); sys.stderr.flush()
             return "[Error: Command timed out (120s)]"
         except requests.exceptions.ConnectionError:
             return "[Error: MCP server not reachable]"
@@ -448,6 +449,10 @@ SYSTEM_PROMPT = (
     "- If something fails, try one alternative, then tell the user\n"
     "- To CREATE files use the 'write' tool with content and file_path\n"
     "- NEVER use cat > heredoc syntax\n"
+    "- When creating Python scripts, NEVER use input() or interactive code.\n"
+    "  Scripts must run non-interactively (hardcoded values, CLI args, or demo mode).\n"
+    "  Interactive scripts will HANG the MCP server and get Killed by the system.\n"
+    "- When running scripts, use 'echo <input> | python3 script.py' if input is needed\n"
     "- Be concise but thorough. Generate long code/text when asked."
 )
 
