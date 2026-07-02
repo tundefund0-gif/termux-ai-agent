@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Termux AI Agent v3.0 — DeepSeek V4 Flash + wujie272/termux-mcp (80 tools)
+Termux AI Agent v3.1 — DeepSeek V4 Flash + wujie272/termux-mcp (80 tools)
 ══════════════════════════════════════════════════════════════════════════
-Real SSE streaming • Reasoning display • Long text generation & input
-Futuristic UI • 80 MCP tools • GitHub enabled
+SSE streaming • Reasoning display • Smart Termux:API detection
+No infinite loops • Long text • Futuristic UI
 ══════════════════════════════════════════════════════════════════════════
 """
 
@@ -69,7 +69,7 @@ class MCP:
         r = self._send("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "termux-ai-agent", "version": "3.0"},
+            "clientInfo": {"name": "termux-ai-agent", "version": "3.1"},
         })
         if not r or "result" not in r:
             return False
@@ -158,7 +158,7 @@ def install_mcp():
             capture_output=True, check=True
         )
     except Exception:
-        print(f"  {color('✖', C.red)} Git clone failed. Check internet.", C.red)
+        print(f"  {color('✖', C.red)} Git clone failed.", C.red)
         return False
     for pkg_cmd in [
         ["pip3", "install", "mcp", "requests"],
@@ -168,7 +168,6 @@ def install_mcp():
             subprocess.run(pkg_cmd, capture_output=True)
         except Exception:
             pass
-    # Enable GitHub tools
     app_py = Path(MCP_DIR) / "termux_mcp" / "app.py"
     if app_py.exists():
         content = app_py.read_text()
@@ -177,6 +176,34 @@ def install_mcp():
             app_py.write_text(content)
             print(f"  {color('✓', C.green)} GitHub tools enabled", C.dim)
     return True
+
+# ─── Termux:API Detection ───────────────────────────────────────────────
+def probe_termux_api(mcp):
+    """Probe Termux:API-dependent tools. Returns warning string or empty."""
+    probe_tools = ["get_battery_status", "list_sms"]
+    failed_cmds = []
+    for tool_name in probe_tools:
+        result = mcp.call(tool_name, {})
+        if "Command not found: termux-" in result:
+            cmd = result.split("Command not found: ")[1].split()[0]
+            failed_cmds.append(cmd)
+
+    if failed_cmds:
+        return (
+            "NOTE: Termux:API is NOT installed (commands not found: "
+            + ", ".join(failed_cmds)
+            + "). "
+            "Tools that require Termux:API will FAIL: get_battery_status, get_location, "
+            "get_sensor_list, read_sensor, list_sms, send_sms, text_to_speech, "
+            "toggle_torch, vibrate, clipboard, list_contacts, send_notification, "
+            "dismiss_notification, list_notifications. "
+            "DO NOT call these tools. If you need battery/sensor info, use execute_command "
+            "with 'dumpsys' or '/sys/class/power_supply/' commands.\n"
+            "IMPORTANT: 'dumpsys' and Android system commands may also fail in Termux "
+            "without root. If an execute_command for battery returns empty/no such file, "
+            "just tell the user battery info is unavailable — do NOT keep trying new approaches."
+        )
+    return ""
 
 # ─── LLM Client with SSE Streaming ──────────────────────────────────────
 class LLM:
@@ -191,7 +218,7 @@ class LLM:
             h["Authorization"] = f"Bearer {self.config['api_key']}"
         return h
 
-    def _payload(self, messages, stream=False):
+    def _payload(self, messages, stream=False, force_text=False):
         p = {
             "model": self.config["model"],
             "messages": messages,
@@ -200,31 +227,26 @@ class LLM:
             "top_p": self.config.get("top_p", 0.95),
             "stream": stream,
         }
-        if self.tools:
+        if self.tools and not force_text:
             p["tools"] = self.tools
             p["tool_choice"] = "auto"
         return p
 
-    def chat(self, messages):
-        """Non-streaming call — for tool detection."""
+    def chat(self, messages, force_text=False):
         resp = self.session.post(
             self.config["base_url"] + "/chat/completions",
             headers=self._headers(),
-            json=self._payload(messages, stream=False),
+            json=self._payload(messages, stream=False, force_text=force_text),
             timeout=180,
         )
         resp.raise_for_status()
         return resp.json()
 
     def chat_stream(self, messages):
-        """
-        Streaming SSE call — yields (content, reasoning, is_done) tuples.
-        Accumulates tool calls silently. At the end yields the full msg dict.
-        """
         resp = self.session.post(
             self.config["base_url"] + "/chat/completions",
             headers=self._headers(),
-            json=self._payload(messages, stream=True),
+            json=self._payload(messages, stream=True, force_text=False),
             stream=True,
             timeout=180,
         )
@@ -252,7 +274,6 @@ class LLM:
                 delta = choices[0].get("delta", {})
                 finish = choices[0].get("finish_reason")
 
-                # Reasoning content (DeepSeek shows this before answering)
                 rc = delta.get("reasoning_content")
                 if rc:
                     full_reasoning += rc
@@ -260,7 +281,6 @@ class LLM:
                         in_reasoning = True
                     yield ("reasoning", rc, False)
 
-                # Regular content
                 content = delta.get("content")
                 if content:
                     full_content += content
@@ -269,7 +289,6 @@ class LLM:
                         yield ("end_reasoning", "", False)
                     yield ("content", content, False)
 
-                # Tool calls
                 tc = delta.get("tool_calls")
                 if tc:
                     for tcc in tc:
@@ -291,7 +310,6 @@ class LLM:
                 if finish == "stop":
                     break
 
-        # Build final message
         msg = {"role": "assistant", "content": full_content}
         if full_reasoning:
             msg["reasoning_content"] = full_reasoning
@@ -302,32 +320,28 @@ class LLM:
 
 # ─── Conversation History Management ────────────────────────────────────
 def trim_history(msgs, max_turns=40):
-    """Keep conversation manageable while preserving context."""
     if len(msgs) <= max_turns:
         return msgs
-    keep = [msgs[0]]  # system prompt
+    keep = [msgs[0]]
     user_msgs = []
-    # Find last 3 user messages
     for i in range(len(msgs) - 1, -1, -1):
         if msgs[i]["role"] == "user":
             user_msgs.insert(0, msgs[i])
             if len(user_msgs) >= 3:
                 break
     keep.extend(user_msgs)
-    # Add last N-3 messages around those
     cutoff = max(1, len(msgs) - (max_turns - len(keep)))
     for i in range(cutoff, len(msgs)):
         if msgs[i] not in keep:
             keep.append(msgs[i])
     return keep
 
-# ─── User Input (with multiline + file support) ─────────────────────────
+# ─── User Input ─────────────────────────────────────────────────────────
 def get_user_input():
     raw = input(f"  {color('You', C.blue)} {color('›', C.cyan)} ").strip()
     if not raw:
         return ""
 
-    # Multiline mode: """..."""
     if raw in ('"""', "'''", "%%%"):
         delimiter = raw
         print(f"  {color('(multiline mode — end with ' + delimiter + ')', C.dim)}")
@@ -342,7 +356,6 @@ def get_user_input():
             pass
         return "\n".join(lines)
 
-    # File input: @/path/to/file
     if raw.startswith("@"):
         fpath = os.path.expanduser(raw[1:].strip())
         if os.path.isfile(fpath):
@@ -357,13 +370,18 @@ def get_user_input():
         return ""
     return raw
 
-# ─── Streaming Display ──────────────────────────────────────────────────
+# ─── Streaming Display + Smart Loop Detection ──────────────────────────
 def display_streaming_response(mcp, llm, msgs, msg):
-    """Display a streaming text response, or process tool calls."""
+    """Display streaming text or process tool calls. Returns True if needs continue."""
     if msg.get("tool_calls"):
         msgs.append(msg)
+        termux_api_missing = False
+        #
+        total_calls = 0
+
         for tc in msg["tool_calls"]:
             name = tc["function"]["name"]
+            total_calls += 1
             try:
                 args = json.loads(tc["function"]["arguments"])
             except Exception:
@@ -372,7 +390,22 @@ def display_streaming_response(mcp, llm, msgs, msg):
             if len(preview) > 60:
                 preview = preview[:60] + "…"
             print(f"  {color('◆', C.magenta)} {color(name, C.cyan)} {color(preview, C.dim)}", end="", flush=True)
+
             result = mcp.call(name, args)
+
+            # Smart Termux:API detection
+            if "Command not found: termux-" in result:
+                termux_api_missing = True
+                cmd_name = result.split("Command not found: ")[1].split()[0]
+                result += (
+                    f"\n\n[SYSTEM: {cmd_name} needs Termux:API which is NOT installed. "
+                    f"Do NOT retry this or similar Termux:API tools.]"
+                )
+
+            # Track execute_command calls for loop detection
+            if name == "execute_command":
+                pass  # execcmd tracking removed
+
             rlen = len(result)
             if rlen < 100:
                 col = C.green
@@ -384,14 +417,29 @@ def display_streaming_response(mcp, llm, msgs, msg):
                 col = C.red
                 tag = "L"
             print(f" {color(f'[{tag}|{rlen}b]', col)}")
+
             if rlen > 50000:
                 result = result[:50000] + f"\n... [truncated {rlen - 50000} more bytes]"
+
             msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+
+        # Inject Termux:API guidance if detected
+        if termux_api_missing:
+            msgs.append({
+                "role": "system",
+                "content": (
+                    "[IMPORTANT] Termux:API is NOT installed. "
+                    "Tools needing termux-battery-status, termux-tts-speak, termux-location, "
+                    "termux-sms, termux-clipboard, termux-notification, termux-torch, "
+                    "termux-vibrate, termux-contact-list, termux-sensor will FAIL. "
+                    "DO NOT call them again. Use execute_command with dumpsys/getprop instead."
+                )
+            })
+
         print(f"  {color('·' * 40, C.dim)}")
-        return True  # had tool calls, should continue
+        return True
     else:
         flush_before = ""
-        # Stream the response
         print(f"  {color('AI', C.green)} {color('›', C.green)} ", end="", flush=True)
         for evt_type, data, done in llm.chat_stream(msgs):
             if evt_type == "reasoning":
@@ -405,32 +453,32 @@ def display_streaming_response(mcp, llm, msgs, msg):
             elif evt_type == "content":
                 print(data, end="", flush=True)
             elif evt_type == "done":
-                # data is the msg dict
                 msgs.append(data)
         print()
-        return False  # no tool calls, conversation turn complete
+        return False
 
 # ─── System Prompt ──────────────────────────────────────────────────────
-SYSTEM_PROMPT = (
+BASE_PROMPT = (
     "You are TermuxAI, an AI assistant controlling an Android device via Termux MCP.\n"
     "You have 80 tools: shell commands, file system, UI automation, ADB/Shizuku,\n"
-    "app management, communication (SMS/calls/clipboard), device sensors, media,\n"
-    "GitHub, and more.\n\n"
+    "app management, communication, device sensors, media, GitHub, and more.\n\n"
     "RULES:\n"
-    "- Execute commands immediately when asked — don't just describe\n"
+    "- Execute commands immediately when asked\n"
     "- Show clear results after each action\n"
-    "- If something fails, try alternatives or explain clearly\n"
-    "- Be concise but thorough\n"
-    "- You can generate long text, code, and analysis"
+    "- If a tool returns 'Command not found: termux-*', Termux:API is missing.\n"
+    "  Do NOT retry that tool or similar ones. Use dumpsys/getprop/sysfs instead.\n"
+    "- If you've tried 2+ approaches for something and still failing, stop trying\n"
+    "  and tell the user what you found. Don't keep experimenting.\n"
+    "- Be concise but thorough. Generate long code/text when asked."
 )
 
 # ─── Banner ─────────────────────────────────────────────────────────────
 BANNER = (
     f"\n"
     f"  {color('╔══════════════════════════════════════════════════╗', C.cyan)}\n"
-    f"  {color('║', C.cyan)}  {color('⚡ TERMUX AI AGENT', C.bold)} {color('v3.0', C.dim)}              {color('║', C.cyan)}\n"
+    f"  {color('║', C.cyan)}  {color('⚡ TERMUX AI AGENT', C.bold)} {color('v3.1', C.dim)}              {color('║', C.cyan)}\n"
     f"  {color('║', C.cyan)}  {color('DeepSeek V4 Flash', C.green)} {color('×', C.dim)} {color('wujie272 MCP', C.magenta)} {color('80 tools', C.dim)} {color('║', C.cyan)}\n"
-    f"  {color('║', C.cyan)}  {color('SSE Streaming • Reasoning • Long Text', C.dim)} {color('║', C.cyan)}\n"
+    f"  {color('║', C.cyan)}  {color('SSE • Reasoning • Smart Loop Detect', C.dim)} {color('║', C.cyan)}\n"
     f"  {color('╚══════════════════════════════════════════════════╝', C.cyan)}"
 )
 
@@ -444,7 +492,6 @@ def main():
     if not install_mcp():
         sys.exit(1)
 
-    # Start MCP server
     print(f"  {color('⟳', C.yellow)} {color('Booting MCP server...', C.dim)}", end="", flush=True)
     mcp = MCP()
     if not mcp.start():
@@ -455,12 +502,24 @@ def main():
 
     tools = mcp.get_tools()
     print(f"  {color('✓', C.green)} {color('MCP', C.cyan)} {color(f'({len(tools)} tools loaded)', C.dim)}")
+
+    print(f"  {color('⟳', C.yellow)} {color('Checking Termux:API availability...', C.dim)}", end="", flush=True)
+    api_warning = probe_termux_api(mcp)
+    if api_warning:
+        print(f" {color('⚠', C.yellow)}")
+        print(f"  {color('⚠', C.yellow)} {color('Termux:API not found', C.dim)}")
+        print(f"  {color('⚠', C.yellow)} {color('Battery/location/SMS/TTS disabled', C.dim)}")
+        system_prompt = BASE_PROMPT + "\n\n" + api_warning
+    else:
+        print(f" {color('✓', C.green)}")
+        system_prompt = BASE_PROMPT
+
     print(f"  {color('✓', C.green)} {color('DeepSeek V4 Flash', C.green)} {color('(opencode.ai)', C.dim)}")
-    print(f"  {color('✓', C.green)} {color('SSE Streaming', C.pink)} {color('•', C.dim)} {color('Reasoning', C.purple)} {color('•', C.dim)} {color('Long Text', C.yellow)}")
+    print(f"  {color('✓', C.green)} {color('SSE Streaming', C.pink)} {color('•', C.dim)} {color('Reasoning', C.purple)} {color('•', C.dim)} {color('Smart Loop Detect', C.teal)}")
     print(f"  {color('─' * 52, C.dim)}")
 
     llm = LLM(config, tools)
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    msgs = [{"role": "system", "content": system_prompt}]
 
     while True:
         try:
@@ -493,16 +552,34 @@ def main():
         msgs.append({"role": "user", "content": raw})
 
         try:
-            # First call: detect tool_calls vs text
             data = llm.chat(msgs)
             choice = data["choices"][0]
             msg = choice["message"]
 
+            tool_rounds = 0
             while True:
                 needs_continue = display_streaming_response(mcp, llm, msgs, msg)
                 if not needs_continue:
                     break
-                # Follow-up after tool calls
+                tool_rounds += 1
+                if tool_rounds >= 3:
+                    print(f"  {color('AI', C.green)} {color('⟳ wrap up...', C.dim)}", end="\r")
+                    sys.stdout.flush()
+                    try:
+                        data = llm.chat(msgs, force_text=True)
+                        next_msg = data["choices"][0]["message"]
+                        final_text = next_msg.get("content", "") or ""
+                        msgs.append(next_msg)
+                        print(" " * 50, end="\r")
+                        print(f"  {color('AI', C.green)} {color('›', C.green)} ", end="", flush=True)
+                        for ch in final_text:
+                            print(ch, end="", flush=True)
+                            time.sleep(0.008)
+                        print()
+                    except Exception as e:
+                        print(" " * 50, end="\r")
+                        print(f"  {color('✖', C.red)} {color(str(e)[:120], C.red)}")
+                    break
                 print(f"  {color('AI', C.green)} {color('⟳ follow-up...', C.dim)}", end="\r")
                 sys.stdout.flush()
                 data = llm.chat(msgs)
